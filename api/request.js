@@ -1,16 +1,14 @@
 // api/request.js
-// Edge function that builds & deploys a tiny app from a brief.
-// - Verifies secret
-// - Generates index.html & README.md with Anthropic (Claude) (has fallback)
-// - Creates/updates public GitHub repo (task name), enables Pages
-// - Notifies evaluation_url with repo_url, commit_sha, pages_url
+// Build & deploy from a brief, with detailed diagnostics.
+// - Accepts secret from body (preferred) or ?secret=... (debug friendly)
+// - Parses JSON even if Content-Type is wrong (fallback to text->JSON)
+// - Adds step-by-step logs so you can see exactly where it fails
 
 export const config = { runtime: "edge" };
 
 const GH_API = "https://api.github.com";
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 
-/* -------------------- helpers -------------------- */
 const J = (status, body) =>
   new Response(JSON.stringify(body), {
     status,
@@ -20,7 +18,27 @@ const J = (status, body) =>
 const toB64 = (s) => btoa(unescape(encodeURIComponent(s)));
 const readSnippet = async (res) => (await res.text().catch(() => "")).slice(0, 500);
 
-/* -------------------- Anthropic -------------------- */
+/* -------------------- tolerant body parser -------------------- */
+async function readBody(req) {
+  const ct = (req.headers.get("content-type") || "").toLowerCase();
+  try {
+    if (ct.includes("application/json")) {
+      return await req.json();
+    }
+    // Postman sometimes says text/plain but body is JSON
+    const text = await req.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      // not JSON, return empty
+      return {};
+    }
+  } catch {
+    return {};
+  }
+}
+
+/* -------------------- Anthropic helpers -------------------- */
 async function anthropicHTML(brief, attachments = [], checks = []) {
   const attachmentText = attachments.length
     ? `\n\nAttachments:\n${attachments.map(a => `- ${a.name || "file"}: ${(a.url || "").slice(0,60)}...`).join("\n")}`
@@ -63,6 +81,7 @@ OUTPUT:
       messages: [{ role: "user", content: prompt }],
     }),
   });
+
   if (!r.ok) throw new Error(`Anthropic ${r.status} ${r.statusText}: ${await readSnippet(r)}`);
 
   const data = await r.json();
@@ -131,7 +150,7 @@ Output ONLY Markdown; no extra text.`;
   return md.replace(/```markdown\n?/g, "").replace(/```\n?/g, "").trim();
 }
 
-/* -------------------- GitHub -------------------- */
+/* -------------------- GitHub helpers -------------------- */
 const ghHeaders = async () => ({
   "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
   "Accept": "application/vnd.github+json",
@@ -223,21 +242,36 @@ async function notify(url, payload, maxRetries = 5) {
 export default async function handler(req) {
   if (req.method !== "POST") return J(405, { error: "Method Not Allowed" });
 
-  // Log which envs exist (booleans only, no secrets)
-  console.log("ENV set ->",
+  // Log env presence (booleans only)
+  console.log("ENV ->",
     "GITHUB_USERNAME:", !!process.env.GITHUB_USERNAME,
     "GITHUB_TOKEN:", !!process.env.GITHUB_TOKEN,
     "STUDENT_SECRET:", !!process.env.STUDENT_SECRET,
     "ANTHROPIC_API_KEY:", !!process.env.ANTHROPIC_API_KEY
   );
 
-  const body = await req.json().catch(() => ({}));
-  const { email, secret, task, round, nonce, brief, checks = [], evaluation_url, attachments = [] } = body || {};
+  // Parse body tolerantly, also read ?secret as fallback
+  const body = await readBody(req);
+  const url = new URL(req.url);
+  const qsSecret = url.searchParams.get("secret");
 
-  // Request sanity log (safe)
+  const {
+    email,
+    secret: bodySecret,
+    task,
+    round,
+    nonce,
+    brief,
+    checks = [],
+    evaluation_url,
+    attachments = [],
+  } = body || {};
+
+  const providedSecret = (bodySecret ?? qsSecret ?? "");
+
   console.log("REQ ->",
     "email:", !!email,
-    "secret_len:", (secret || "").length,
+    "secret_len:", providedSecret.length,
     "task:", task,
     "round:", round,
     "nonce_len:", (nonce || "").length,
@@ -245,15 +279,17 @@ export default async function handler(req) {
     "eval_url:", !!evaluation_url
   );
 
-  // Env presence check
+  // env presence check
   if (!process.env.GITHUB_USERNAME || !process.env.GITHUB_TOKEN || !process.env.STUDENT_SECRET || !process.env.ANTHROPIC_API_KEY) {
     return J(500, { error: "Server missing one or more env vars (see logs)" });
   }
 
-  // Secret check
-  if (!secret || secret !== process.env.STUDENT_SECRET) return J(403, { error: "Invalid secret" });
+  // secret check (exact match)
+  if (!providedSecret || providedSecret !== process.env.STUDENT_SECRET) {
+    return J(403, { error: "Invalid secret" });
+  }
 
-  // Required fields
+  // required fields
   if (!email || !task || !round || !nonce || !brief || !evaluation_url) {
     return J(400, { error: "Missing required fields" });
   }
@@ -272,7 +308,7 @@ export default async function handler(req) {
       html = fallbackHTML(brief);
     }
 
-    // 2) README (try, fallback)
+    // 2) README (with fallback)
     let readme;
     try {
       console.log("STEP 2: Anthropic README…");
@@ -283,11 +319,11 @@ export default async function handler(req) {
       readme = `# ${task}\n\nAuto-generated fallback README.\n\n## Brief\n\n${brief}\n\n## License\n\nMIT`;
     }
 
-    // 3) Create/reuse repo
+    // 3) Create or reuse repo
     console.log("STEP 3: Create/Reuse repo…");
     const repo = await ghCreateRepo(task);
     const repoUrl = repo?.html_url || `https://github.com/${owner}/${task}`;
-    console.log("STEP 3: repo url ->", repoUrl);
+    console.log("STEP 3: repo ->", repoUrl);
 
     // 4) Push files
     console.log("STEP 4: Push files…");
