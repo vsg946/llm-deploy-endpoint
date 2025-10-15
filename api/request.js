@@ -7,8 +7,7 @@
 // - POSTs back to evaluation_url with repo_url, commit_sha, pages_url
 
 export const config = { runtime: "edge" };
-console.log("Provided secret length:", (secret || "").length);
-console.log("Env secret length:", (process.env.STUDENT_SECRET || "").length);
+
 
 
 const GH_API = "https://api.github.com";
@@ -230,7 +229,8 @@ export default async function handler(req) {
     email, secret, task, round, nonce,
     brief, checks = [], evaluation_url, attachments = [],
   } = body;
-
+  console.log("Provided secret length:", (secret || "").length);
+  console.log("Env secret length:", (process.env.STUDENT_SECRET || "").length);
   // 0) Validate env
   const owner = process.env.GITHUB_USERNAME;
   if (!owner || !process.env.GITHUB_TOKEN || !process.env.ANTHROPIC_API_KEY) {
