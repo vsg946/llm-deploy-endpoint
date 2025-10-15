@@ -7,6 +7,9 @@
 // - POSTs back to evaluation_url with repo_url, commit_sha, pages_url
 
 export const config = { runtime: "edge" };
+console.log("Provided secret length:", (secret || "").length);
+console.log("Env secret length:", (process.env.STUDENT_SECRET || "").length);
+
 
 const GH_API = "https://api.github.com";
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
